@@ -142,6 +142,10 @@
     <div>iPhone'da uygulama gibi kullanmak için Safari'de alttaki <b>Paylaş</b> butonuna, sonra <b>Ana Ekrana Ekle</b>'ye dokun.</div>
     <button id="hideBanner" aria-label="Kapat">✕</button>
   </div>
+  <div id="pushBanner" class="banner hidden">
+    <div>Yeni görevlerden ve son tarihlerden haberdar olmak için bildirimleri aç.</div>
+    <button id="pushBannerBtn" style="white-space:nowrap">Aç</button>
+  </div>
   <nav class="chips" id="chips" aria-label="Filtre"></nav>
   <div id="list"></div>
 </main>
@@ -159,6 +163,16 @@
    MY DAILY — uygulama kodu
    ========================================================= */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzOt3HhIKqlIBH5CFNsnAwnUdnxMeL99aDhqV3aGypK79gTk9TUgIlSQsk3lnDnY6C8/exec';
+const FIREBASE_CONFIG = {
+  apiKey: 'AIzaSyDrHvYc2Ou7YJjhH91MaL4BkqkuR5EfIzU',
+  authDomain: 'my-daily-31c36.firebaseapp.com',
+  projectId: 'my-daily-31c36',
+  storageBucket: 'my-daily-31c36.firebasestorage.app',
+  messagingSenderId: '291901074047',
+  appId: '1:291901074047:web:75c56774d6d4fbe390ed4a'
+};
+const VAPID_KEY = 'BAPRqRm1L_O-C-7vxKz-mobyWO-kNbqaV9D6RSZZpQlRGY_JkRgpUN4xve5ugWjDzRq-d2Vo_PUjzMg9Si2VJbc';
+const FB_VER = '10.12.2';
 
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -245,8 +259,10 @@ function startApp() {
   const standalone = window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches;
   const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
   if (ios && !standalone && !store.get('md_banner_hidden', false)) $('installBanner').classList.remove('hidden');
+  updatePushBanner();
   render();
   load(true);
+  if (pushState() === 'granted') registerPushToken().catch(() => {});
 }
 
 /* ---------- görev sınıflandırma ---------- */
@@ -470,10 +486,85 @@ async function deleteTask(t) {
   } catch (e) { toast('Silinemedi: ' + e.message); }
 }
 
+/* ---------- bildirimler ---------- */
+const isStandalone = () => window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches;
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
+const pushSupported = () => 'Notification' in window && 'serviceWorker' in navigator && 'PushManager' in window;
+function pushState() {
+  if (!pushSupported()) return isIOS() && !isStandalone() ? 'needs-install' : 'unsupported';
+  return Notification.permission; // 'granted' | 'denied' | 'default'
+}
+
+let fbMessaging = null;
+async function registerPushToken() {
+  const reg = await navigator.serviceWorker.ready;
+  if (!fbMessaging) {
+    const fa = await import('https://www.gstatic.com/firebasejs/' + FB_VER + '/firebase-app.js');
+    const fm = await import('https://www.gstatic.com/firebasejs/' + FB_VER + '/firebase-messaging.js');
+    const app = fa.getApps().length ? fa.getApp() : fa.initializeApp(FIREBASE_CONFIG);
+    fbMessaging = { m: fm.getMessaging(app), getToken: fm.getToken };
+  }
+  const token = await fbMessaging.getToken(fbMessaging.m, { vapidKey: VAPID_KEY, serviceWorkerRegistration: reg });
+  if (!token) throw new Error('Bildirim kimliği alınamadı');
+  if (token !== store.get('md_push_token', null)) {
+    await api('saveToken', { token: token });
+    store.set('md_push_token', token);
+  }
+  return token;
+}
+
+async function enableNotifications(btn) {
+  const st = pushState();
+  if (st === 'needs-install') return toast('Önce uygulamayı ana ekrana ekle ve oradan aç');
+  if (st === 'unsupported') return toast('Bu tarayıcı bildirimleri desteklemiyor');
+  if (st === 'denied') return toast('Bildirim izni kapalı. Ayarlar > Bildirimler > My Daily kısmından aç');
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') return toast('Bildirim izni verilmedi');
+  if (btn) { btn.disabled = true; btn.textContent = 'Açılıyor…'; }
+  try {
+    await registerPushToken();
+    $('pushBanner').classList.add('hidden');
+    closeSheet();
+    toast('Bildirimler açıldı 🎉');
+  } catch (e) {
+    toast('Bildirimler açılamadı: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = 'Bildirimleri aç'; }
+  }
+}
+
+async function sendTestPush(btn) {
+  btn.disabled = true; btn.textContent = 'Gönderiliyor…';
+  try {
+    const r = await api('testPush');
+    toast(r.gonderilen ? 'Test bildirimi gönderildi, birkaç saniye içinde gelir' : 'Kayıtlı cihaz bulunamadı');
+  } catch (e) { toast('Gönderilemedi: ' + e.message); }
+  finally { btn.disabled = false; btn.textContent = 'Test bildirimi gönder'; }
+}
+
+function updatePushBanner() {
+  const show = KEY && isStandalone() && pushState() === 'default';
+  $('pushBanner').classList.toggle('hidden', !show);
+}
+
 /* ---------- ayarlar ---------- */
 function settingsSheet() {
   const s = DATA.settings;
+  const st = pushState();
   let h = '<h2>Ayarlar</h2>';
+  h += '<div class="field"><span class="lbl">Bildirimler</span>';
+  if (st === 'granted') {
+    h += '<p class="hint" style="margin:0 0 8px">✅ Bildirimler açık. Yeni atanan görevler ve son tarihe 24 saat / 2 saat kala hatırlatma gelecek.</p>' +
+      '<button class="btn ghost" id="sTestPush" style="border:1px solid var(--line)">Test bildirimi gönder</button>';
+  } else if (st === 'needs-install') {
+    h += '<p class="hint" style="margin:0">Bildirim alabilmek için önce uygulamayı ana ekrana ekle (Safari › Paylaş › Ana Ekrana Ekle) ve oradan aç.</p>';
+  } else if (st === 'denied') {
+    h += '<p class="hint" style="margin:0">Bildirim izni kapalı. iPhone Ayarlar › Bildirimler › My Daily kısmından açabilirsin.</p>';
+  } else if (st === 'unsupported') {
+    h += '<p class="hint" style="margin:0">Bu tarayıcı bildirimleri desteklemiyor.</p>';
+  } else {
+    h += '<button class="btn" id="sPush">Bildirimleri aç</button>';
+  }
+  h += '</div>';
   h += '<div class="field"><label for="sDeadline">Atanan görevlerde son saat (mesai bitişi)</label><input id="sDeadline" type="time" class="inp" value="' + esc(s.deadlineTime) + '"></div>';
   h += '<p class="hint" style="margin:-6px 0 16px">Son tarihi olan atanmış görevler bu saatte bitmiş sayılır. Hatırlatmalar: 24 saat ve 2 saat önce.</p>';
   h += '<button class="btn" id="sSave">Kaydet</button>';
@@ -481,6 +572,8 @@ function settingsSheet() {
   h += '<button class="btn ghost" id="sAddList" style="margin-top:-8px">+ Listeyi ekle</button>';
   h += '<div class="actions" style="margin-top:16px"><button class="btn danger" id="sLogout">Bu cihazdan çıkış yap</button><button class="btn ghost" id="sClose">Kapat</button></div>';
   openSheet(h);
+  if ($('sPush')) $('sPush').onclick = (e) => enableNotifications(e.currentTarget);
+  if ($('sTestPush')) $('sTestPush').onclick = (e) => sendTestPush(e.currentTarget);
   $('sClose').onclick = closeSheet;
   $('sLogout').onclick = () => { if (confirm('Bu cihazdan çıkış yapılsın mı? Tekrar girmek için anahtar gerekecek.')) logout(); };
   $('sSave').onclick = async () => {
@@ -509,7 +602,8 @@ $('fab').onclick = () => taskForm(null);
 $('refreshBtn').onclick = () => load(false);
 $('settingsBtn').onclick = settingsSheet;
 $('shade').onclick = closeSheet;
-$('hideBanner').onclick = () => { $('installBanner').classList.add('hidden'); store.set('md_banner_hidden', true); };
+$('pushBannerBtn').onclick = () => enableNotifications(null);
+$('hideBanner').onclick =() => { $('installBanner').classList.add('hidden'); store.set('md_banner_hidden', true); };
 $('chips').addEventListener('click', (e) => { const b = e.target.closest('[data-filter]'); if (b) { FILTER = b.dataset.filter; render(); } });
 $('list').addEventListener('click', (e) => {
   const tg = e.target.closest('[data-toggle]'); if (tg) return toggleDone(tg.dataset.toggle);
