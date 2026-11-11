@@ -1,5 +1,5 @@
 // My Daily — service worker (çevrimdışı açılma ve bildirimler)
-const CACHE = 'mydaily-v2';
+const CACHE = 'mydaily-v3';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
